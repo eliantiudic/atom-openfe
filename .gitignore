@@ -7,6 +7,4 @@ dist/
 *.egg-info/
 .mypy_cache/
 .ruff_cache/
-examples/openfe_fkbp_abfe/logs/
-examples/openfe_fkbp_abfe/runs/
-examples/openfe_fkbp_abfe/slurm-*.out
+examples/
