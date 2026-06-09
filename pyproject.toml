@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atom-openfe"
+version = "0.1.0"
+description = "AToM-OpenMM transfer protocols for OpenFE/gufe"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "gufe",
+    "openff-units",
+    "pydantic>=2",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+atom_openfe = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
