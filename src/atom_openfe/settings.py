@@ -539,8 +539,8 @@ class ATMAnalysisSettings(SettingsBaseModel):
         return self
 
 
-class ATMTransferSettings(gufe_settings.Settings):
-    """Settings for one-box AToM transfer protocols."""
+class ATMSettings(gufe_settings.Settings):
+    """Settings for one-box AToM protocols."""
 
     forcefield_settings: gufe_settings.BaseForceFieldSettings = Field(
         default_factory=gufe_settings.OpenMMSystemGeneratorFFSettings
@@ -578,11 +578,11 @@ class ATMTransferSettings(gufe_settings.Settings):
         return options
 
 
-class ATMAbsoluteBindingSettings(ATMTransferSettings):
+class ATMAbsoluteBindingSettings(ATMSettings):
     """Settings for AToM ABFE through the ghost-ligand transfer path."""
 
 
-class ATMRelativeBindingSettings(ATMTransferSettings):
+class ATMRelativeBindingSettings(ATMSettings):
     """Settings for AToM small-molecule RBFE through the transfer path."""
 
     run: ATMRunSettings = Field(default_factory=lambda: ATMRunSettings(basename="atom_rbfe"))

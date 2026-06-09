@@ -13,9 +13,9 @@ from openff.units import unit
 from atom_openfe import (
     ATMAbsoluteBindingProtocol,
     ATMAbsoluteBindingSettings,
-    ATMABFEAnalysisUnit,
-    ATMABFERunUnit,
-    ATMABFESetupUnit,
+    ATMAnalysisUnit,
+    ATMRunUnit,
+    ATMSetupUnit,
     ATMRelativeBindingProtocol,
     ATMRelativeBindingSettings,
     ATMScheduleSettings,
@@ -55,9 +55,9 @@ def test_abfe_protocol_creates_setup_run_analysis_dag(abfe_state_a, abfe_state_b
     units = dag.protocol_units
 
     assert [unit.name for unit in units] == ["setup", "run", "analysis"]
-    assert isinstance(units[0], ATMABFESetupUnit)
-    assert isinstance(units[1], ATMABFERunUnit)
-    assert isinstance(units[2], ATMABFEAnalysisUnit)
+    assert isinstance(units[0], ATMSetupUnit)
+    assert isinstance(units[1], ATMRunUnit)
+    assert isinstance(units[2], ATMAnalysisUnit)
     assert units[1].dependencies == [units[0]]
     assert set(units[2].dependencies) == {units[0], units[1]}
 
@@ -73,9 +73,9 @@ def test_rbfe_protocol_creates_setup_run_analysis_dag(
     units = dag.protocol_units
 
     assert [unit.name for unit in units] == ["setup", "run", "analysis"]
-    assert isinstance(units[0], ATMABFESetupUnit)
-    assert isinstance(units[1], ATMABFERunUnit)
-    assert isinstance(units[2], ATMABFEAnalysisUnit)
+    assert isinstance(units[0], ATMSetupUnit)
+    assert isinstance(units[1], ATMRunUnit)
+    assert isinstance(units[2], ATMAnalysisUnit)
 
 
 def test_transformation_can_create_abfe_protocoldag(abfe_state_a, abfe_state_b):

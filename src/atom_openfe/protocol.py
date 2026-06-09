@@ -21,11 +21,11 @@ from openff.units import unit
 
 from . import adapter
 from .settings import ATMAbsoluteBindingSettings, ATMRelativeBindingSettings
-from .units import ATMTransferAnalysisUnit, ATMTransferRunUnit, ATMTransferSetupUnit
+from .units import ATMAnalysisUnit, ATMRunUnit, ATMSetupUnit
 
 
-class ATMTransferProtocolResult(ProtocolResult):
-    """Aggregated AToM transfer result."""
+class ATMProtocolResult(ProtocolResult):
+    """Aggregated AToM result."""
 
     def get_estimate(self):
         if "estimate" not in self.data:
@@ -55,25 +55,25 @@ class ATMTransferProtocolResult(ProtocolResult):
         return list(self.data.get("artifacts", []))
 
 
-class ATMAbsoluteBindingProtocolResult(ATMTransferProtocolResult):
+class ATMAbsoluteBindingProtocolResult(ATMProtocolResult):
     """Aggregated AToM ABFE result."""
 
 
-class ATMRelativeBindingProtocolResult(ATMTransferProtocolResult):
+class ATMRelativeBindingProtocolResult(ATMProtocolResult):
     """Aggregated AToM RBFE result."""
 
 
-class _ATMTransferProtocolMixin:
+class _ATMProtocolMixin:
     _transfer_mode: str
 
-    def _create_transfer_units(
+    def _create_atm_units(
         self,
         *,
         stateA: ChemicalSystem,
         stateB: ChemicalSystem,
         mapping: ComponentMapping | list[ComponentMapping] | None,
     ) -> list[ProtocolUnit]:
-        setup = ATMTransferSetupUnit(
+        setup = ATMSetupUnit(
             name="setup",
             protocol=self,
             stateA=stateA,
@@ -81,8 +81,8 @@ class _ATMTransferProtocolMixin:
             mapping=mapping,
             transfer_mode=self._transfer_mode,
         )
-        run = ATMTransferRunUnit(name="run", setup=setup)
-        analysis = ATMTransferAnalysisUnit(
+        run = ATMRunUnit(name="run", setup=setup)
+        analysis = ATMAnalysisUnit(
             name="analysis",
             protocol=self,
             setup=setup,
@@ -141,7 +141,7 @@ class _ATMTransferProtocolMixin:
         }
 
 
-class ATMAbsoluteBindingProtocol(_ATMTransferProtocolMixin, Protocol):
+class ATMAbsoluteBindingProtocol(_ATMProtocolMixin, Protocol):
     """One-box AToM absolute binding free energy protocol.
 
     OpenFE-facing states use standard ABFE semantics:
@@ -166,7 +166,7 @@ class ATMAbsoluteBindingProtocol(_ATMTransferProtocolMixin, Protocol):
         extends: ProtocolDAGResult | None = None,
     ) -> list[ProtocolUnit]:
         self.validate(stateA=stateA, stateB=stateB, mapping=mapping, extends=extends)
-        return self._create_transfer_units(stateA=stateA, stateB=stateB, mapping=mapping)
+        return self._create_atm_units(stateA=stateA, stateB=stateB, mapping=mapping)
 
     def _validate(
         self,
@@ -190,7 +190,7 @@ class ATMAbsoluteBindingProtocol(_ATMTransferProtocolMixin, Protocol):
         _require_count(stateB, SmallMoleculeComponent, 0, "stateB ligand")
 
 
-class ATMRelativeBindingProtocol(_ATMTransferProtocolMixin, Protocol):
+class ATMRelativeBindingProtocol(_ATMProtocolMixin, Protocol):
     """One-box AToM small-molecule relative binding free energy protocol."""
 
     _settings_cls = ATMRelativeBindingSettings
@@ -209,7 +209,7 @@ class ATMRelativeBindingProtocol(_ATMTransferProtocolMixin, Protocol):
         extends: ProtocolDAGResult | None = None,
     ) -> list[ProtocolUnit]:
         self.validate(stateA=stateA, stateB=stateB, mapping=mapping, extends=extends)
-        return self._create_transfer_units(stateA=stateA, stateB=stateB, mapping=mapping)
+        return self._create_atm_units(stateA=stateA, stateB=stateB, mapping=mapping)
 
     def _validate(
         self,

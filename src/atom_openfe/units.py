@@ -9,11 +9,11 @@ from gufe.protocols import Context, ProtocolUnit, ProtocolUnitResult
 
 from . import adapter
 from .analysis import parse_atom_analysis_output
-from .settings import ATMTransferSettings
+from .settings import ATMSettings
 
 
-class ATMTransferSetupUnit(ProtocolUnit):
-    """Validate gufe inputs and prepare an AToM transfer work directory."""
+class ATMSetupUnit(ProtocolUnit):
+    """Validate gufe inputs and prepare an AToM work directory."""
 
     @staticmethod
     def _execute(
@@ -27,7 +27,7 @@ class ATMTransferSetupUnit(ProtocolUnit):
         **inputs,
     ) -> dict[str, Any]:
         protocol.validate(stateA=stateA, stateB=stateB, mapping=mapping)
-        settings: ATMTransferSettings = protocol.settings
+        settings: ATMSettings = protocol.settings
 
         ctx.shared.mkdir(parents=True, exist_ok=True)
 
@@ -84,7 +84,7 @@ class ATMTransferSetupUnit(ProtocolUnit):
         }
 
 
-class ATMTransferRunUnit(ProtocolUnit):
+class ATMRunUnit(ProtocolUnit):
     """Execute AToM RBFE-style structure preparation and production."""
 
     @staticmethod
@@ -108,7 +108,7 @@ class ATMTransferRunUnit(ProtocolUnit):
         return {"atom_result": atom_result}
 
 
-class ATMTransferAnalysisUnit(ProtocolUnit):
+class ATMAnalysisUnit(ProtocolUnit):
     """Parse AToM/UWHAM output into gufe result fields."""
 
     @staticmethod
@@ -120,7 +120,7 @@ class ATMTransferAnalysisUnit(ProtocolUnit):
         run: ProtocolUnitResult,
         **inputs,
     ) -> dict[str, Any]:
-        settings: ATMTransferSettings = protocol.settings
+        settings: ATMSettings = protocol.settings
         atom_result = dict(run.outputs.get("atom_result", {}))
 
         if {"unit_estimate", "unit_estimate_error"} <= set(atom_result):
@@ -213,7 +213,7 @@ def _write_component_files(
 
 
 def _alignment_options(
-    settings: ATMTransferSettings,
+    settings: ATMSettings,
     transfer_mode: str,
     mapping,
 ) -> dict[str, Any]:
@@ -235,7 +235,7 @@ def _alignment_options(
 
 
 def _resolve_result_file(
-    settings: ATMTransferSettings,
+    settings: ATMSettings,
     setup: ProtocolUnitResult,
     atom_result: dict[str, Any],
 ) -> Path | None:
@@ -311,8 +311,3 @@ def _maybe_float(value):
     if value is None:
         return None
     return float(value)
-
-
-ATMABFESetupUnit = ATMTransferSetupUnit
-ATMABFERunUnit = ATMTransferRunUnit
-ATMABFEAnalysisUnit = ATMTransferAnalysisUnit

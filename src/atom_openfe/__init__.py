@@ -5,7 +5,7 @@ from .protocol import (
     ATMAbsoluteBindingProtocolResult,
     ATMRelativeBindingProtocol,
     ATMRelativeBindingProtocolResult,
-    ATMTransferProtocolResult,
+    ATMProtocolResult,
 )
 from .settings import (
     ATMAbsoluteBindingSettings,
@@ -20,15 +20,12 @@ from .settings import (
     ATMSetupSettings,
     ATMSoftcoreSettings,
     ATMSystemSettings,
-    ATMTransferSettings,
+    ATMSettings,
 )
 from .units import (
-    ATMABFEAnalysisUnit,
-    ATMABFERunUnit,
-    ATMABFESetupUnit,
-    ATMTransferAnalysisUnit,
-    ATMTransferRunUnit,
-    ATMTransferSetupUnit,
+    ATMAnalysisUnit,
+    ATMRunUnit,
+    ATMSetupUnit,
 )
 
 __all__ = [
@@ -36,8 +33,8 @@ __all__ = [
     "ATMAbsoluteBindingProtocolResult",
     "ATMRelativeBindingProtocol",
     "ATMRelativeBindingProtocolResult",
-    "ATMTransferProtocolResult",
-    "ATMTransferSettings",
+    "ATMProtocolResult",
+    "ATMSettings",
     "ATMAbsoluteBindingSettings",
     "ATMRelativeBindingSettings",
     "ATMAlignmentSettings",
@@ -50,10 +47,7 @@ __all__ = [
     "ATMSetupSettings",
     "ATMSoftcoreSettings",
     "ATMSystemSettings",
-    "ATMABFEAnalysisUnit",
-    "ATMABFERunUnit",
-    "ATMABFESetupUnit",
-    "ATMTransferSetupUnit",
-    "ATMTransferRunUnit",
-    "ATMTransferAnalysisUnit",
+    "ATMSetupUnit",
+    "ATMRunUnit",
+    "ATMAnalysisUnit",
 ]
