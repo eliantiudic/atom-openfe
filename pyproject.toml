@@ -10,9 +10,16 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "gufe",
+    "networkx",
+    "numpy",
+    "openfe>=1.11",
+    "openff-toolkit",
     "openff-units",
+    "openmm",
+    "openmmforcefields",
     "pydantic>=2",
     "pyyaml",
+    "rdkit",
 ]
 
 [project.optional-dependencies]

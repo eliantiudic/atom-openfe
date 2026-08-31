@@ -147,7 +147,8 @@ class ATMAbsoluteBindingProtocol(_ATMProtocolMixin, Protocol):
     OpenFE-facing states use standard ABFE semantics:
     stateA contains protein, ligand, and solvent; stateB contains the same
     protein/solvent environment without a ligand. Internally AToM receives an
-    RBFE-style L1/L2 system where L2 is a patched one-particle ghost.
+    RBFE-style L1/L2 system where L2 is a natively parameterized one-particle
+    ghost present before solvation and serialization.
     """
 
     _settings_cls = ATMAbsoluteBindingSettings
@@ -182,12 +183,33 @@ class ATMAbsoluteBindingProtocol(_ATMProtocolMixin, Protocol):
         if mapping is not None:
             warnings.warn("A mapping was passed but is not used by ATMAbsoluteBindingProtocol.")
 
-        _require_count(stateA, ProteinComponent, 1, "stateA protein")
-        _require_count(stateA, SolventComponent, 1, "stateA solvent")
+        protein_a = _require_count(
+            stateA, ProteinComponent, 1, "stateA protein"
+        )[0]
+        solvent_a = _require_count(
+            stateA, SolventComponent, 1, "stateA solvent"
+        )[0]
         _require_count(stateA, SmallMoleculeComponent, 1, "stateA ligand")
-        _require_count(stateB, ProteinComponent, 1, "stateB protein")
-        _require_count(stateB, SolventComponent, 1, "stateB solvent")
+        protein_b = _require_count(
+            stateB, ProteinComponent, 1, "stateB protein"
+        )[0]
+        solvent_b = _require_count(
+            stateB, SolventComponent, 1, "stateB solvent"
+        )[0]
         _require_count(stateB, SmallMoleculeComponent, 0, "stateB ligand")
+        _reject_unhandled_components(stateA, expected=3)
+        _reject_unhandled_components(stateB, expected=2)
+        _validate_shared_environment(protein_a, protein_b, solvent_a, solvent_b)
+        if self.settings.alignment.ligand1_ref_atoms is not None:
+            raise ProtocolValidationError(
+                "AToM ABFE uses a one-particle L2 ghost and cannot use paired "
+                "three-atom ligand alignment references"
+            )
+        if self.settings.alignment.ligand2_attach_atom not in (None, 0):
+            raise ProtocolValidationError(
+                "AToM ABFE L2 is a one-particle ghost; ligand2_attach_atom "
+                "must be omitted or 0"
+            )
 
 
 class ATMRelativeBindingProtocol(_ATMProtocolMixin, Protocol):
@@ -222,14 +244,25 @@ class ATMRelativeBindingProtocol(_ATMProtocolMixin, Protocol):
         if extends is not None:
             raise ProtocolValidationError("AToM RBFE does not support extends yet")
 
-        _require_count(stateA, ProteinComponent, 1, "stateA protein")
-        _require_count(stateA, SolventComponent, 1, "stateA solvent")
+        protein_a = _require_count(
+            stateA, ProteinComponent, 1, "stateA protein"
+        )[0]
+        solvent_a = _require_count(
+            stateA, SolventComponent, 1, "stateA solvent"
+        )[0]
         ligand_a = _require_count(stateA, SmallMoleculeComponent, 1, "stateA ligand")[0]
-        _require_count(stateB, ProteinComponent, 1, "stateB protein")
-        _require_count(stateB, SolventComponent, 1, "stateB solvent")
+        protein_b = _require_count(
+            stateB, ProteinComponent, 1, "stateB protein"
+        )[0]
+        solvent_b = _require_count(
+            stateB, SolventComponent, 1, "stateB solvent"
+        )[0]
         ligand_b = _require_count(stateB, SmallMoleculeComponent, 1, "stateB ligand")[0]
+        _reject_unhandled_components(stateA, expected=3)
+        _reject_unhandled_components(stateB, expected=3)
 
         ligand_mapping = _validate_single_ligand_mapping(mapping, ligand_a, ligand_b)
+        _validate_shared_environment(protein_a, protein_b, solvent_a, solvent_b)
         if self.settings.alignment.ligand1_ref_atoms is None:
             adapter.derive_mapping_alignment(ligand_mapping)
 
@@ -268,3 +301,38 @@ def _validate_single_ligand_mapping(
         )
 
     return mapping
+
+
+def _validate_shared_environment(
+    protein_a: ProteinComponent,
+    protein_b: ProteinComponent,
+    solvent_a: SolventComponent,
+    solvent_b: SolventComponent,
+) -> None:
+    for solvent in (solvent_a, solvent_b):
+        if solvent.smiles != "O":
+            raise ProtocolValidationError(
+                "AToM native setup currently supports only water "
+                "SolventComponent(smiles='O')"
+            )
+    if protein_a != protein_b:
+        raise ProtocolValidationError(
+            "AToM one-box setup requires identical protein components in stateA "
+            "and stateB"
+        )
+    if solvent_a != solvent_b:
+        raise ProtocolValidationError(
+            "AToM one-box setup requires identical solvent components in stateA "
+            "and stateB"
+        )
+
+
+def _reject_unhandled_components(
+    state: ChemicalSystem, *, expected: int
+) -> None:
+    if len(state.components) != expected:
+        raise ProtocolValidationError(
+            "AToM native one-box setup does not support additional ChemicalSystem "
+            f"components; {state.name!r} has {len(state.components)}, expected "
+            f"{expected}"
+        )

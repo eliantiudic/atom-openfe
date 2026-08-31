@@ -33,6 +33,21 @@ def test_default_settings_construct():
     assert rbfe_settings.run.basename == "atom_rbfe"
     assert abfe_settings.displacement.displacement is None
     assert len(abfe_settings.schedule.lambdas) == 22
+    assert abfe_settings.system.ghost_mass == pytest.approx(12.011)
+    assert rbfe_settings.system.model_dump() == {}
+    assert not hasattr(abfe_settings.system, "protein_forcefields")
+    assert not hasattr(abfe_settings.run, "hmass")
+
+
+def test_thermo_temperature_is_the_only_atom_temperature_source():
+    settings = ATMAbsoluteBindingProtocol.default_settings()
+    settings.thermo_settings.temperature = 315.0 * unit.kelvin
+
+    options = settings.to_atom_options()
+
+    assert options["TEMPERATURES"] == [315.0]
+    assert "HMASS" not in options
+    assert not hasattr(settings.schedule, "temperatures")
 
 
 def test_protocol_serializes_deserializes():
@@ -145,108 +160,6 @@ def test_mapping_derived_alignment(rbfe_mapping):
     assert len(options["ALIGN_LIGAND2_REF_ATOMS"]) == 3
 
 
-def test_abfe_setup_calls_make_system_without_lig2_and_patches_ghost(
-    monkeypatch, tmp_path
-):
-    calls = {"make_system": None, "patch": None}
-
-    make_module = types.ModuleType("atom_openmm.make_atm_system_from_rcpt_lig")
-    utils_module = types.ModuleType("atom_openmm.utils.AtomUtils")
-
-    def fake_make_system(**kwargs):
-        calls["make_system"] = kwargs
-
-    def fake_patch_system_with_ghost(pdb_file, xml_file, displacement, ghost_mass, attach_index=None):
-        calls["patch"] = {
-            "pdb_file": pdb_file,
-            "xml_file": xml_file,
-            "displacement": displacement,
-            "ghost_mass": ghost_mass,
-            "attach_index": attach_index,
-        }
-
-    make_module.make_system = fake_make_system
-    utils_module.calc_displ_vec = lambda receptor_file, ligand_file: [22.0, 0.0, 0.0]
-    utils_module.patch_system_with_ghost = fake_patch_system_with_ghost
-    monkeypatch.setitem(sys.modules, "atom_openmm", types.ModuleType("atom_openmm"))
-    monkeypatch.setitem(sys.modules, "atom_openmm.utils", types.ModuleType("atom_openmm.utils"))
-    monkeypatch.setitem(
-        sys.modules,
-        "atom_openmm.make_atm_system_from_rcpt_lig",
-        make_module,
-    )
-    monkeypatch.setitem(sys.modules, "atom_openmm.utils.AtomUtils", utils_module)
-    monkeypatch.setattr(adapter, "system_has_ghost_pair", lambda pdb_file: False)
-    monkeypatch.setattr(
-        adapter,
-        "derive_prepared_transfer_options",
-        lambda **kwargs: {
-            "LIGAND1_ATOMS": [0, 1],
-            "LIGAND2_ATOMS": [2],
-            "DISPLACEMENT": [22.0, 0.0, 0.0],
-        },
-    )
-
-    prepared = adapter.prepare_atm_transfer_system(
-        mode="abfe",
-        options={"BASENAME": "atom_abfe"},
-        workdir=tmp_path,
-        receptor_file=tmp_path / "receptor.pdb",
-        ligand1_file=tmp_path / "ligand1.sdf",
-    )
-
-    assert "lig2file" not in calls["make_system"]
-    assert calls["patch"]["ghost_mass"] == pytest.approx(12.011)
-    assert prepared["atom_options"]["LIGAND2_ATOMS"] == [2]
-
-
-def test_rbfe_setup_calls_make_system_with_lig2_and_no_ghost_patch(
-    monkeypatch, tmp_path
-):
-    calls = {"make_system": None, "patch": False}
-
-    make_module = types.ModuleType("atom_openmm.make_atm_system_from_rcpt_lig")
-    utils_module = types.ModuleType("atom_openmm.utils.AtomUtils")
-
-    def fake_make_system(**kwargs):
-        calls["make_system"] = kwargs
-
-    make_module.make_system = fake_make_system
-    utils_module.calc_displ_vec = lambda receptor_file, ligand_file: [22.0, 0.0, 0.0]
-    utils_module.patch_system_with_ghost = lambda *args, **kwargs: calls.update(
-        {"patch": True}
-    )
-    monkeypatch.setitem(sys.modules, "atom_openmm", types.ModuleType("atom_openmm"))
-    monkeypatch.setitem(sys.modules, "atom_openmm.utils", types.ModuleType("atom_openmm.utils"))
-    monkeypatch.setitem(
-        sys.modules,
-        "atom_openmm.make_atm_system_from_rcpt_lig",
-        make_module,
-    )
-    monkeypatch.setitem(sys.modules, "atom_openmm.utils.AtomUtils", utils_module)
-    monkeypatch.setattr(
-        adapter,
-        "derive_prepared_transfer_options",
-        lambda **kwargs: {
-            "LIGAND1_ATOMS": [0, 1],
-            "LIGAND2_ATOMS": [2, 3],
-            "DISPLACEMENT": [22.0, 0.0, 0.0],
-        },
-    )
-
-    adapter.prepare_atm_transfer_system(
-        mode="rbfe",
-        options={"BASENAME": "atom_rbfe"},
-        workdir=tmp_path,
-        receptor_file=tmp_path / "receptor.pdb",
-        ligand1_file=tmp_path / "ligand1.sdf",
-        ligand2_file=tmp_path / "ligand2.sdf",
-    )
-
-    assert calls["make_system"]["lig2file"].endswith("ligand2.sdf")
-    assert calls["patch"] is False
-
-
 def test_run_resume_checks(monkeypatch, tmp_path):
     calls = {"structprep": 0, "production": 0}
     structprep_module = types.ModuleType("atom_openmm.rbfe_structprep")
@@ -254,10 +167,12 @@ def test_run_resume_checks(monkeypatch, tmp_path):
 
     def fake_structprep(config_file=None, options=None):
         calls["structprep"] += 1
+        options["TIME_STEP"] = 0.001
         (tmp_path / "atom_rbfe_0.xml").write_text("<state />")
 
     def fake_production(config_file=None, options=None):
         calls["production"] += 1
+        assert options["TIME_STEP"] == pytest.approx(0.004)
         for idx in range(2):
             repdir = tmp_path / f"r{idx}"
             repdir.mkdir(exist_ok=True)
@@ -273,6 +188,7 @@ def test_run_resume_checks(monkeypatch, tmp_path):
         "BASENAME": "atom_rbfe",
         "LAMBDAS": [0.0, 1.0],
         "MAX_SAMPLES": 3,
+        "TIME_STEP": 0.004,
     }
 
     first = adapter.run_atm_transfer(options=options, workdir=tmp_path)
@@ -324,9 +240,27 @@ def test_uwham_analysis_defaults_to_first_third_discard(monkeypatch, tmp_path):
 def test_abfe_run_and_analysis_with_mocked_atom_execution(
     monkeypatch, tmp_path, abfe_state_a, abfe_state_b
 ):
+    settings = ATMAbsoluteBindingProtocol.default_settings()
+    settings.analysis.run_uwham = False
+
     def fake_prepare_atm_transfer_system(**kwargs):
         assert kwargs["mode"] == "abfe"
-        assert kwargs["ligand2_file"] is None
+        assert kwargs["ligand2"] is None
+        assert kwargs["receptor"] == abfe_state_a.components["protein"]
+        assert kwargs["ligand1"] == abfe_state_a.components["ligand"]
+        assert kwargs["solvent"] == abfe_state_a.components["solvent"]
+        assert kwargs["forcefield_settings"] == settings.forcefield_settings
+        assert kwargs["thermo_settings"] == settings.thermo_settings
+        assert kwargs["solvation_settings"] == settings.solvation_settings
+        assert kwargs["partial_charge_settings"] == settings.partial_charge_settings
+        assert kwargs["ghost_mass"] == pytest.approx(settings.system.ghost_mass)
+        assert kwargs["forcefield_cache"] == settings.setup.forcefield_cache
+        assert not {
+            "receptor_file",
+            "ligand1_file",
+            "ligand2_file",
+            "protein_forcefields",
+        } & kwargs.keys()
         assert "ALIGN_LIGAND1_REF_ATOMS" not in kwargs["options"]
         workdir = kwargs["workdir"]
         options = dict(kwargs["options"])
@@ -364,8 +298,6 @@ def test_abfe_run_and_analysis_with_mocked_atom_execution(
     monkeypatch.setattr(adapter, "prepare_atm_transfer_system", fake_prepare_atm_transfer_system)
     monkeypatch.setattr(adapter, "run_atm_transfer", fake_run_atm_transfer)
 
-    settings = ATMAbsoluteBindingProtocol.default_settings()
-    settings.analysis.run_uwham = False
     protocol = ATMAbsoluteBindingProtocol(settings=settings)
     dag = protocol.create(stateA=abfe_state_a, stateB=abfe_state_b, mapping=None)
 
@@ -394,9 +326,27 @@ def test_abfe_run_and_analysis_with_mocked_atom_execution(
 def test_rbfe_run_and_analysis_with_mocked_atom_execution(
     monkeypatch, tmp_path, rbfe_state_a, rbfe_state_b, rbfe_mapping
 ):
+    settings = ATMRelativeBindingProtocol.default_settings()
+    settings.analysis.run_uwham = False
+
     def fake_prepare_atm_transfer_system(**kwargs):
         assert kwargs["mode"] == "rbfe"
-        assert kwargs["ligand2_file"] is not None
+        assert kwargs["receptor"] == rbfe_state_a.components["protein"]
+        assert kwargs["ligand1"] == rbfe_state_a.components["ligand"]
+        assert kwargs["ligand2"] == rbfe_state_b.components["ligand"]
+        assert kwargs["solvent"] == rbfe_state_a.components["solvent"]
+        assert kwargs["forcefield_settings"] == settings.forcefield_settings
+        assert kwargs["thermo_settings"] == settings.thermo_settings
+        assert kwargs["solvation_settings"] == settings.solvation_settings
+        assert kwargs["partial_charge_settings"] == settings.partial_charge_settings
+        assert kwargs["ghost_mass"] is None
+        assert kwargs["forcefield_cache"] == settings.setup.forcefield_cache
+        assert not {
+            "receptor_file",
+            "ligand1_file",
+            "ligand2_file",
+            "protein_forcefields",
+        } & kwargs.keys()
         assert "ALIGN_LIGAND1_REF_ATOMS" in kwargs["options"]
         workdir = kwargs["workdir"]
         options = dict(kwargs["options"])
@@ -433,8 +383,6 @@ def test_rbfe_run_and_analysis_with_mocked_atom_execution(
     monkeypatch.setattr(adapter, "prepare_atm_transfer_system", fake_prepare_atm_transfer_system)
     monkeypatch.setattr(adapter, "run_atm_transfer", fake_run_atm_transfer)
 
-    settings = ATMRelativeBindingProtocol.default_settings()
-    settings.analysis.run_uwham = False
     protocol = ATMRelativeBindingProtocol(settings=settings)
     dag = protocol.create(stateA=rbfe_state_a, stateB=rbfe_state_b, mapping=rbfe_mapping)
 

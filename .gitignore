@@ -9,3 +9,5 @@ dist/
 .ruff_cache/
 examples/logs/
 examples/runs/
+/examples/ABFE/**/logs/
+/examples/ABFE/**/runs/

@@ -9,9 +9,9 @@ from .protocol import (
 )
 from .settings import (
     ATMAbsoluteBindingSettings,
+    ATMAbsoluteSystemSettings,
     ATMAlignmentSettings,
     ATMAnalysisSettings,
-    ATMAtomIndexSettings,
     ATMDisplacementSettings,
     ATMRelativeBindingSettings,
     ATMRestraintSettings,
@@ -36,10 +36,10 @@ __all__ = [
     "ATMProtocolResult",
     "ATMSettings",
     "ATMAbsoluteBindingSettings",
+    "ATMAbsoluteSystemSettings",
     "ATMRelativeBindingSettings",
     "ATMAlignmentSettings",
     "ATMAnalysisSettings",
-    "ATMAtomIndexSettings",
     "ATMDisplacementSettings",
     "ATMRestraintSettings",
     "ATMRunSettings",

@@ -4,7 +4,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from gufe import ChemicalSystem, ProteinComponent, SmallMoleculeComponent
+from gufe import (
+    ChemicalSystem,
+    ProteinComponent,
+    SmallMoleculeComponent,
+    SolventComponent,
+)
 from gufe.protocols import Context, ProtocolUnit, ProtocolUnitResult
 
 from . import adapter
@@ -36,12 +41,16 @@ class ATMSetupUnit(ProtocolUnit):
             "stateB": stateB.name,
             "transfer_mode": transfer_mode,
         }
-        component_files = _write_component_files(
-            stateA=stateA,
-            stateB=stateB,
-            transfer_mode=transfer_mode,
-            shared=ctx.shared,
-            write_manifest=settings.setup.write_component_files,
+        components = _setup_components(stateA, stateB, transfer_mode)
+        component_files = (
+            _write_component_files(
+                stateA=stateA,
+                stateB=stateB,
+                transfer_mode=transfer_mode,
+                shared=ctx.shared,
+            )
+            if settings.setup.write_component_files
+            else {}
         )
 
         atom_options = settings.to_atom_options()
@@ -52,15 +61,20 @@ class ATMSetupUnit(ProtocolUnit):
             mode=transfer_mode,
             options=atom_options,
             workdir=ctx.shared,
-            receptor_file=component_files["receptor_pdb"],
-            ligand1_file=component_files["ligand1_sdf"],
-            ligand2_file=component_files.get("ligand2_sdf"),
-            prepared_system_pdb=settings.setup.prepared_system_pdb,
-            prepared_system_xml=settings.setup.prepared_system_xml,
-            protein_forcefields=list(settings.system.protein_forcefields),
-            solvent_forcefields=list(settings.system.solvent_forcefields),
-            ligand_forcefield=settings.system.ligand_forcefield,
-            ionic_strength=settings.system.ionic_strength,
+            receptor=components["receptor"],
+            ligand1=components["ligand1"],
+            ligand2=components.get("ligand2"),
+            solvent=components["solvent"],
+            forcefield_settings=settings.forcefield_settings,
+            thermo_settings=settings.thermo_settings,
+            solvation_settings=settings.solvation_settings,
+            partial_charge_settings=settings.partial_charge_settings,
+            ghost_mass=(
+                settings.system.ghost_mass
+                if transfer_mode == "abfe"
+                else None
+            ),
+            forcefield_cache=settings.setup.forcefield_cache,
         )
 
         diagnostics.update(prepared.get("diagnostics", {}))
@@ -180,7 +194,6 @@ def _write_component_files(
     stateB: ChemicalSystem,
     transfer_mode: str,
     shared: Path,
-    write_manifest: bool,
 ) -> dict[str, str]:
     files: dict[str, str] = {}
 
@@ -200,16 +213,34 @@ def _write_component_files(
     protein.to_pdb_file(receptor_path)
     files["receptor_pdb"] = str(receptor_path)
 
-    if write_manifest:
-        manifest_path = shared / "component_manifest.yaml"
-        manifest = {
-            "stateA": _manifest_for_state(stateA),
-            "stateB": _manifest_for_state(stateB),
-        }
-        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=True))
-        files["component_manifest"] = str(manifest_path)
+    manifest_path = shared / "component_manifest.yaml"
+    manifest = {
+        "stateA": _manifest_for_state(stateA),
+        "stateB": _manifest_for_state(stateB),
+    }
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=True))
+    files["component_manifest"] = str(manifest_path)
 
     return files
+
+
+def _setup_components(
+    stateA: ChemicalSystem,
+    stateB: ChemicalSystem,
+    transfer_mode: str,
+) -> dict[str, Any]:
+    components: dict[str, Any] = {
+        "receptor": _one_component(stateA, ProteinComponent, "stateA protein"),
+        "ligand1": _one_component(
+            stateA, SmallMoleculeComponent, "stateA ligand"
+        ),
+        "solvent": _one_component(stateA, SolventComponent, "stateA solvent"),
+    }
+    if transfer_mode == "rbfe":
+        components["ligand2"] = _one_component(
+            stateB, SmallMoleculeComponent, "stateB ligand"
+        )
+    return components
 
 
 def _alignment_options(

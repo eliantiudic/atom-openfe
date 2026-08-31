@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import math
 import os
-import shutil
-from collections.abc import Mapping
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +35,14 @@ def derive_mapping_alignment(mapping) -> dict[str, list[int] | int]:
         raise ValueError(
             "AToM RBFE alignment derivation requires 3D coordinates on ligand A"
         ) from exc
+    try:
+        conf_b = mol_b.GetConformer()
+    except ValueError as exc:
+        raise ValueError(
+            "AToM RBFE alignment derivation requires 3D coordinates on ligand B"
+        ) from exc
 
-    points = {
+    points_a = {
         i: (
             float(conf_a.GetAtomPosition(i).x),
             float(conf_a.GetAtomPosition(i).y),
@@ -45,21 +50,42 @@ def derive_mapping_alignment(mapping) -> dict[str, list[int] | int]:
         )
         for i, _ in candidates
     }
+    points_b = {
+        j: (
+            float(conf_b.GetAtomPosition(j).x),
+            float(conf_b.GetAtomPosition(j).y),
+            float(conf_b.GetAtomPosition(j).z),
+        )
+        for _, j in candidates
+    }
 
     centroid = tuple(
-        sum(point[axis] for point in points.values()) / len(points) for axis in range(3)
+        sum(point[axis] for point in points_a.values()) / len(points_a)
+        for axis in range(3)
     )
-    first = min(candidates, key=lambda pair: _distance(points[pair[0]], centroid))
-    second = max(candidates, key=lambda pair: _distance(points[pair[0]], points[first[0]]))
-    third = max(
-        (pair for pair in candidates if pair not in {first, second}),
-        key=lambda pair: _triangle_area(points[first[0]], points[second[0]], points[pair[0]]),
+    triple = max(
+        combinations(candidates, 3),
+        key=lambda selected: min(
+            _triangle_area(*(points_a[pair[0]] for pair in selected)),
+            _triangle_area(*(points_b[pair[1]] for pair in selected)),
+        ),
     )
-
-    if _triangle_area(points[first[0]], points[second[0]], points[third[0]]) < 1.0e-3:
+    if min(
+        _triangle_area(*(points_a[pair[0]] for pair in triple)),
+        _triangle_area(*(points_b[pair[1]] for pair in triple)),
+    ) < 1.0e-3:
         raise ValueError(
-            "AToM RBFE alignment requires three non-collinear mapped heavy-atom pairs"
+            "AToM RBFE alignment requires three mapped heavy-atom pairs that "
+            "are non-collinear in both ligands"
         )
+
+    first = min(triple, key=lambda pair: _distance(points_a[pair[0]], centroid))
+    remaining = [pair for pair in triple if pair != first]
+    second = max(
+        remaining,
+        key=lambda pair: _distance(points_a[pair[0]], points_a[first[0]]),
+    )
+    third = next(pair for pair in remaining if pair != second)
 
     ligand1_ref_atoms = [first[0], second[0], third[0]]
     ligand2_ref_atoms = [first[1], second[1], third[1]]
@@ -76,26 +102,20 @@ def prepare_atm_transfer_system(
     mode: str,
     options: dict[str, Any],
     workdir: str | Path,
-    receptor_file: str | Path,
-    ligand1_file: str | Path,
-    ligand2_file: str | Path | None = None,
-    prepared_system_pdb: str | Path | None = None,
-    prepared_system_xml: str | Path | None = None,
-    protein_forcefields: list[str] | None = None,
-    solvent_forcefields: list[str] | None = None,
-    ligand_forcefield: str | None = None,
-    ionic_strength: float = 0.15,
+    receptor,
+    ligand1,
+    solvent,
+    forcefield_settings,
+    thermo_settings,
+    solvation_settings,
+    partial_charge_settings,
+    ghost_mass: float | None,
+    forcefield_cache: str | Path | None,
+    ligand2=None,
 ) -> dict[str, Any]:
-    """Create or import an AToM transfer system and derive final options."""
+    """Build, serialize, and round-trip validate a native AToM system."""
 
-    try:
-        from atom_openmm.make_atm_system_from_rcpt_lig import make_system
-        from atom_openmm.utils.AtomUtils import calc_displ_vec, patch_system_with_ghost
-    except ImportError as exc:
-        raise RuntimeError(
-            "atom_openmm is not importable. Install AToM-OpenMM or add its "
-            "checkout to PYTHONPATH before preparing real AToM systems."
-        ) from exc
+    from .system_builder import build_atm_system
 
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -104,60 +124,49 @@ def prepare_atm_transfer_system(
     basename = str(atom_options["BASENAME"])
     pdb_path = workdir / f"{basename}.pdb"
     xml_path = workdir / f"{basename}_sys.xml"
+    cache_path = None
+    if forcefield_cache is not None:
+        cache_path = _resolve_workdir_path(workdir, forcefield_cache)
 
-    if "DISPLACEMENT" not in atom_options or not atom_options["DISPLACEMENT"]:
-        displacement_ligand = ligand2_file if ligand2_file is not None else ligand1_file
-        atom_options["DISPLACEMENT"] = list(
-            calc_displ_vec(str(receptor_file), str(displacement_ligand))
-        )
-
-    if prepared_system_pdb is not None and prepared_system_xml is not None:
-        shutil.copyfile(prepared_system_pdb, pdb_path)
-        shutil.copyfile(prepared_system_xml, xml_path)
-    else:
-        system_kwargs: dict[str, Any] = {
-            "receptorfile": str(receptor_file),
-            "lig1file": str(ligand1_file),
-            "displacement": atom_options["DISPLACEMENT"],
-            "xmloutfile": str(xml_path),
-            "pdboutfile": str(pdb_path),
-            "hmass": atom_options.get("HMASS", 1.0),
-            "ionicstrength": ionic_strength,
-            "flagverbose": bool(atom_options.get("VERBOSE", False)),
+    alignment_options = {
+        key: value
+        for key, value in atom_options.items()
+        if key
+        in {
+            "ALIGN_LIGAND1_REF_ATOMS",
+            "ALIGN_LIGAND2_REF_ATOMS",
+            "LIGAND1_ATTACH_INDEX",
+            "LIGAND2_ATTACH_INDEX",
         }
-        if mode == "rbfe":
-            if ligand2_file is None:
-                raise ValueError("RBFE mode requires ligand2_file")
-            system_kwargs["lig2file"] = str(ligand2_file)
-        if protein_forcefields is not None:
-            system_kwargs["proteinforcefield"] = protein_forcefields
-        if solvent_forcefields is not None:
-            system_kwargs["solventforcefield"] = solvent_forcefields
-        if ligand_forcefield is not None:
-            system_kwargs["ligandforcefield"] = ligand_forcefield
-        if atom_options.get("FORCEFIELD_CACHE") is not None:
-            system_kwargs["ffcachefile"] = str(
-                _resolve_workdir_path(workdir, atom_options["FORCEFIELD_CACHE"])
-            )
-
-        make_system(**system_kwargs)
-
-    if mode == "abfe" and not system_has_ghost_pair(pdb_path):
-        patch_system_with_ghost(
-            str(pdb_path),
-            str(xml_path),
-            atom_options["DISPLACEMENT"],
-            atom_options.get("GHOST_MASS", 12.011),
-            attach_index=atom_options.get("LIGAND_ATTACH_INDEX"),
-        )
-
-    prepared_options = derive_prepared_transfer_options(
+    }
+    displacement = atom_options.get("DISPLACEMENT")
+    prepared = build_atm_system(
         mode=mode,
-        options=atom_options,
-        pdb_file=pdb_path,
+        receptor=receptor,
+        ligand1=ligand1,
+        ligand2=ligand2,
+        solvent=solvent,
+        forcefield_settings=forcefield_settings,
+        thermo_settings=thermo_settings,
+        solvation_settings=solvation_settings,
+        partial_charge_settings=partial_charge_settings,
+        displacement=(tuple(displacement) if displacement is not None else None),
+        ghost_mass=ghost_mass,
+        cache=cache_path,
+        alignment_options=alignment_options,
     )
-    atom_options.update(prepared_options)
+    atom_options.update(prepared.atom_options)
     atom_options["WORKDIR"] = str(workdir)
+
+    roundtrip = _serialize_prepared_system(
+        prepared=prepared,
+        mode=mode,
+        pdb_path=pdb_path,
+        xml_path=xml_path,
+        forcefield_settings=forcefield_settings,
+        ghost_mass=ghost_mass,
+    )
+    atom_options.update(prepared.atom_options)
 
     options_path = workdir / f"{basename}.yaml"
     _write_yaml(options_path, atom_options)
@@ -167,127 +176,105 @@ def prepare_atm_transfer_system(
         "atom_options_path": str(options_path),
         "prepared_system_pdb": str(pdb_path),
         "prepared_system_xml": str(xml_path),
-        "diagnostics": {
-            "mode": mode,
-            "ghost_patched": mode == "abfe",
-            "prepared_from_files": prepared_system_pdb is not None,
-        },
+        "diagnostics": {**prepared.diagnostics, "roundtrip": roundtrip},
     }
 
 
-def derive_prepared_transfer_options(
+def _serialize_prepared_system(
     *,
+    prepared,
     mode: str,
-    options: Mapping[str, Any],
-    pdb_file: str | Path,
+    pdb_path: Path,
+    xml_path: Path,
+    forcefield_settings,
+    ghost_mass: float | None,
 ) -> dict[str, Any]:
-    """Derive AToM RBFE-style options from a prepared L1/L2 PDB."""
+    """Serialize the contract files and validate the objects AToM reloads."""
 
-    try:
-        from atom_openmm.utils.AtomUtils import (
-            get_attach_atom_from_residue,
-            get_indexes_from_query,
-            get_indexes_from_residue,
-            get_residue_by_name,
-            get_selected_principal_groups,
+    from openmm import XmlSerializer
+    from openmm.app import PDBFile
+
+    from .system_builder import PreparedATMSystem, derive_atm_options
+    from .system_validation import validate_prepared_system
+
+    with pdb_path.open("w") as stream:
+        PDBFile.writeFile(
+            prepared.topology, prepared.positions, stream, keepIds=True
         )
-        from openmm import Vec3
-        from openmm.app import PDBFile
-        from openmm.unit import angstrom, nanometer
-    except ImportError as exc:
-        raise RuntimeError(
-            "atom_openmm/openmm is not importable. Install AToM-OpenMM and OpenMM "
-            "before deriving prepared AToM options."
-        ) from exc
+    pdb = PDBFile(str(pdb_path))
+    if _topology_signature(pdb.topology) != _topology_signature(prepared.topology):
+        raise ValueError("PDB round-trip changed AToM atom order or topology metadata")
 
-    pdb = PDBFile(str(pdb_file))
-    topology = pdb.topology
-    positions = pdb.positions
+    pdb_box = pdb.topology.getPeriodicBoxVectors()
+    if pdb_box is None:
+        raise ValueError("Serialized AToM PDB lost its periodic box vectors")
+    prepared.topology.setPeriodicBoxVectors(pdb_box)
+    prepared.system.setDefaultPeriodicBoxVectors(*pdb_box)
+    prepared.positions = pdb.positions
 
-    ligand1_residue = get_residue_by_name(topology, "L1")
-    ligand2_residue = get_residue_by_name(topology, "L2")
-    if ligand1_residue is None or ligand2_residue is None:
-        raise ValueError("Prepared AToM transfer systems must contain L1 and L2 residues")
-
-    ligand1_atoms = get_indexes_from_residue(ligand1_residue)
-    ligand2_atoms = get_indexes_from_residue(ligand2_residue)
-
-    ligand1_attach_atom = _select_attach_atom(
-        ligand1_residue,
-        options.get("LIGAND1_ATTACH_INDEX"),
-        options.get("ALIGN_LIGAND1_REF_ATOMS"),
-        get_attach_atom_from_residue,
-        positions,
-    )
-    ligand2_attach_atom = _select_attach_atom(
-        ligand2_residue,
-        options.get("LIGAND2_ATTACH_INDEX"),
-        options.get("ALIGN_LIGAND2_REF_ATOMS"),
-        get_attach_atom_from_residue,
-        positions,
-    )
-
-    lig1cm_pos = positions[ligand1_attach_atom.index]
-    lig2cm_pos = positions[ligand2_attach_atom.index]
-    displ = (lig2cm_pos - lig1cm_pos).value_in_unit(angstrom)
-
-    rcpt_chain_names = list(options.get("RCPT_CHAIN_NAMES", ["A"]))
-    rcpt_chain_query = f"atom.residue.chain.id in {rcpt_chain_names}"
-    rcpt_frame_indexes = get_indexes_from_query(
-        topology,
-        rcpt_chain_query + ' and atom.name == "CA"',
-    )
-    if not rcpt_frame_indexes:
-        raise ValueError(
-            "Could not derive AToM receptor frame: no CA atoms matched "
-            f"RCPT_CHAIN_NAMES={rcpt_chain_names}"
+    alignment_options: dict[str, Any] = {}
+    for number, role in (("1", "L1"), ("2", "L2")):
+        refs = prepared.atom_options.get(f"ALIGN_LIGAND{number}_REF_ATOMS")
+        if refs is not None:
+            alignment_options[f"ALIGN_LIGAND{number}_REF_ATOMS"] = list(refs)
+        alignment_options[f"LIGAND{number}_ATTACH_INDEX"] = (
+            prepared.atom_options[f"LIGAND{number}_ATTACH_ATOM"]
+            - prepared.role_atom_indices[role][0]
         )
-    rcpt_frame = get_selected_principal_groups(topology, positions, rcpt_frame_indexes)
+    prepared.atom_options = derive_atm_options(
+        mode=mode,
+        topology=pdb.topology,
+        positions=pdb.positions,
+        role_atom_indices=prepared.role_atom_indices,
+        alignment_options=alignment_options,
+    )
 
-    rcpt_cm_pos = Vec3(
-        float(rcpt_frame["origin"]["com"][0]),
-        float(rcpt_frame["origin"]["com"][1]),
-        float(rcpt_frame["origin"]["com"][2]),
-    ) * nanometer
-    offset = (lig1cm_pos - rcpt_cm_pos).value_in_unit(angstrom)
+    with xml_path.open("w") as stream:
+        stream.write(XmlSerializer.serialize(prepared.system))
+    with xml_path.open() as stream:
+        roundtrip_system = XmlSerializer.deserialize(stream.read())
 
-    prepared_options: dict[str, Any] = {
-        "LIGAND1_ATOMS": ligand1_atoms,
-        "LIGAND2_ATOMS": ligand2_atoms,
-        "LIGAND1_VAR_ATOMS": ligand1_atoms,
-        "LIGAND2_VAR_ATOMS": ligand2_atoms,
-        "LIGAND1_ATTACH_ATOM": ligand1_attach_atom.index,
-        "LIGAND2_ATTACH_ATOM": ligand2_attach_atom.index,
-        "LIGAND1_CM_ATOMS": [ligand1_attach_atom.index],
-        "LIGAND2_CM_ATOMS": [ligand2_attach_atom.index],
-        "DISPLACEMENT": [displ.x, displ.y, displ.z],
-        "RCPT_CM_ATOMS": rcpt_frame["origin"]["indices"],
-        "RCPT_FRAME_ATOMS_O": rcpt_frame["origin"]["indices"],
-        "RCPT_FRAME_ATOMS_Z": rcpt_frame["z_axis"]["indices"],
-        "RCPT_FRAME_ATOMS_Y": rcpt_frame["y_axis"]["indices"],
-        "LIGOFFSET": [offset.x, offset.y, offset.z],
-        "POS_RESTRAINED_ATOMS": None
-        if mode == "abfe"
-        else rcpt_frame["origin"]["indices"],
-        "EXCLUSION_POT_MOL1_INDEXES": get_indexes_from_query(
-            topology,
-            f"({rcpt_chain_query}) and (atom.element.atomic_number != 1)",
-        ),
-        "EXCLUSION_POT_MOL2_INDEXES": get_indexes_from_residue(
-            ligand2_residue,
-            query="(atom.element.atomic_number != 1)",
-        ),
+    roundtrip_prepared = PreparedATMSystem(
+        topology=pdb.topology,
+        positions=pdb.positions,
+        system=roundtrip_system,
+        component_atom_indices=prepared.component_atom_indices,
+        component_residue_indices=prepared.component_residue_indices,
+        role_atom_indices=prepared.role_atom_indices,
+        role_residue_indices=prepared.role_residue_indices,
+        atom_options=prepared.atom_options,
+        diagnostics=dict(prepared.diagnostics),
+        ligand_molecules=prepared.ligand_molecules,
+        box_sizing_positions_nm=prepared.box_sizing_positions_nm,
+    )
+    validation = validate_prepared_system(
+        roundtrip_prepared,
+        mode=mode,
+        forcefield_settings=forcefield_settings,
+        ghost_mass=ghost_mass,
+        check_energy=True,
+    )
+    return {
+        "pdb_xml_validated": True,
+        "atom_signature_preserved": True,
+        "validation": validation,
     }
 
-    if options.get("ALIGN_LIGAND1_REF_ATOMS") is not None:
-        prepared_options["ALIGN_LIGAND1_REF_ATOMS"] = list(
-            options["ALIGN_LIGAND1_REF_ATOMS"]
-        )
-        prepared_options["ALIGN_LIGAND2_REF_ATOMS"] = list(
-            options["ALIGN_LIGAND2_REF_ATOMS"]
-        )
 
-    return prepared_options
+def _topology_signature(
+    topology,
+) -> list[tuple[int, int, str, str, str, str | None]]:
+    return [
+        (
+            atom.residue.chain.index,
+            atom.residue.index,
+            atom.name,
+            atom.residue.name,
+            atom.residue.chain.id,
+            atom.element.symbol if atom.element is not None else None,
+        )
+        for atom in topology.atoms()
+    ]
 
 
 def run_atm_transfer(
@@ -324,7 +311,9 @@ def run_atm_transfer(
             workdir,
             rbfe_structprep,
             config_file=None,
-            options=atom_options,
+            # rbfe_structprep massages TIME_STEP and other keys in place.
+            # Keep the authoritative runtime options intact for production.
+            options=dict(atom_options),
         )
         structprep_ran = True
 
@@ -334,7 +323,7 @@ def run_atm_transfer(
             workdir,
             rbfe_production,
             config_file=None,
-            options=atom_options,
+            options=dict(atom_options),
         )
         production_ran = True
 
@@ -418,22 +407,6 @@ def analyze_atm_uwham(
     }
 
 
-def system_has_ghost_pair(pdb_file: str | Path) -> bool:
-    try:
-        from openmm.app import PDBFile
-    except ImportError as exc:
-        raise RuntimeError("OpenMM is required to inspect prepared AToM PDB files") from exc
-
-    pdb = PDBFile(str(pdb_file))
-    l1_residues = [residue for residue in pdb.topology.residues() if residue.name == "L1"]
-    l2_residues = [residue for residue in pdb.topology.residues() if residue.name == "L2"]
-    return (
-        len(l1_residues) == 1
-        and len(l2_residues) == 1
-        and len(list(l2_residues[0].atoms())) == 1
-    )
-
-
 def count_replica_samples(
     workdir: str | Path,
     basename: str,
@@ -463,20 +436,6 @@ def transfer_artifacts(workdir: str | Path, basename: str) -> dict[str, str]:
         "equilibrated_pdb": workdir / f"{basename}_equil.pdb",
     }
     return {name: str(path) for name, path in candidates.items() if path.exists()}
-
-
-def _select_attach_atom(
-    residue,
-    attach_index,
-    ref_atoms,
-    get_attach_atom_from_residue,
-    positions,
-):
-    if attach_index is not None:
-        return list(residue.atoms())[int(attach_index)]
-    if ref_atoms is not None:
-        return list(residue.atoms())[int(ref_atoms[0])]
-    return get_attach_atom_from_residue(residue, positions=positions)
 
 
 def _resolve_workdir_path(workdir: Path, path: str | Path) -> Path:

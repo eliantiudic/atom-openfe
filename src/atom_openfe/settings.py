@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from gufe import settings as gufe_settings
 from gufe.settings import SettingsBaseModel
 from openff.units import unit
 from pydantic import Field, field_validator, model_validator
+
+from .openfe_compat import (
+    OpenFFPartialChargeSettings,
+    OpenMMSolvationSettings,
+    validate_solvation_settings,
+)
 
 
 def _default_lambdas() -> list[float]:
@@ -112,7 +119,6 @@ def _default_zeros() -> list[float]:
 class ATMScheduleSettings(SettingsBaseModel):
     """Alchemical schedule fields consumed by AToM transfer protocols."""
 
-    temperatures: list[float] = Field(default_factory=lambda: [300.0])
     lambdas: list[float] = Field(default_factory=_default_lambdas)
     directions: list[int] = Field(default_factory=_default_directions)
     intermediates: list[int] = Field(default_factory=_default_intermediates)
@@ -123,15 +129,6 @@ class ATMScheduleSettings(SettingsBaseModel):
     w0coeff: list[float] = Field(default_factory=_default_zeros)
     lambda3: list[float] | None = None
     u1: list[float] | None = None
-
-    @field_validator("temperatures")
-    @classmethod
-    def _temperatures_nonempty(cls, value: list[float]) -> list[float]:
-        if not value:
-            raise ValueError("AToM schedules require at least one temperature")
-        if any(v <= 0 for v in value):
-            raise ValueError("temperatures must be positive Kelvin values")
-        return value
 
     @model_validator(mode="after")
     def _validate_schedule(self) -> "ATMScheduleSettings":
@@ -186,7 +183,6 @@ class ATMScheduleSettings(SettingsBaseModel):
 
     def to_atom_options(self) -> dict[str, object]:
         options: dict[str, object] = {
-            "TEMPERATURES": list(self.temperatures),
             "LAMBDAS": list(self.lambdas),
             "DIRECTION": list(self.directions),
             "INTERMEDIATE": list(self.intermediates),
@@ -267,43 +263,9 @@ class ATMAlignmentSettings(SettingsBaseModel):
             options["ALIGN_LIGAND2_REF_ATOMS"] = list(self.ligand2_ref_atoms or [])
         if self.ligand1_attach_atom is not None:
             options["LIGAND1_ATTACH_INDEX"] = self.ligand1_attach_atom
-            options["LIGAND_ATTACH_INDEX"] = self.ligand1_attach_atom
         if self.ligand2_attach_atom is not None:
             options["LIGAND2_ATTACH_INDEX"] = self.ligand2_attach_atom
         return options
-
-
-class ATMAtomIndexSettings(SettingsBaseModel):
-    """Compatibility settings for caller-provided prepared-system indices."""
-
-    ligand_atoms: list[int] | None = None
-    ligand_atoms0: list[int] | None = None
-    ligand_cm_atoms: list[int] | None = None
-    receptor_cm_atoms: list[int] | None = None
-    pos_restrained_atoms: list[int] | None = None
-
-    @field_validator(
-        "ligand_atoms",
-        "ligand_atoms0",
-        "ligand_cm_atoms",
-        "receptor_cm_atoms",
-        "pos_restrained_atoms",
-    )
-    @classmethod
-    def _indices_nonnegative(cls, value: list[int] | None) -> list[int] | None:
-        if value is not None and any(i < 0 for i in value):
-            raise ValueError("atom indices must be non-negative")
-        return value
-
-    def to_atom_options(self) -> dict[str, object]:
-        mapping = {
-            "LIGAND_ATOMS": self.ligand_atoms,
-            "LIGAND_ATOMS0": self.ligand_atoms0,
-            "LIGAND_CM_ATOMS": self.ligand_cm_atoms,
-            "RCPT_CM_ATOMS": self.receptor_cm_atoms,
-            "POS_RESTRAINED_ATOMS": self.pos_restrained_atoms,
-        }
-        return {key: value for key, value in mapping.items() if value is not None}
 
 
 class ATMRestraintSettings(SettingsBaseModel):
@@ -311,7 +273,6 @@ class ATMRestraintSettings(SettingsBaseModel):
 
     cm_kf: float = 25.0
     cm_tol: float = 5.0
-    ligand_offset: tuple[float, float, float] | None = None
     posre_force_constant: float = 0.0
     posre_tolerance: float = 3.5
     align_kf_sep: float = 0.0
@@ -346,8 +307,6 @@ class ATMRestraintSettings(SettingsBaseModel):
             "ALIGN_K_THETA": self.align_k_theta,
             "ALIGN_K_PSI": self.align_k_psi,
         }
-        if self.ligand_offset is not None:
-            options["LIGOFFSET"] = list(self.ligand_offset)
         return options
 
 
@@ -383,41 +342,26 @@ class ATMSoftcoreSettings(SettingsBaseModel):
 
 
 class ATMSystemSettings(SettingsBaseModel):
-    """AToM system construction settings."""
-
-    protein_forcefields: list[str] = Field(default_factory=lambda: ["amber14-all.xml"])
-    solvent_forcefields: list[str] = Field(default_factory=lambda: ["amber14/tip3p.xml"])
-    ligand_forcefield: str = "openff-2.3.0"
-    ionic_strength: float = 0.15
-    forcefield_cache: str | None = "ff.json"
-    receptor_chain_names: list[str] = Field(default_factory=lambda: ["A"])
-    ghost_mass: float = 12.011
-
-    @model_validator(mode="after")
-    def _validate_system_settings(self) -> "ATMSystemSettings":
-        if not self.protein_forcefields:
-            raise ValueError("protein_forcefields must not be empty")
-        if not self.solvent_forcefields:
-            raise ValueError("solvent_forcefields must not be empty")
-        if not self.ligand_forcefield.strip():
-            raise ValueError("ligand_forcefield must be non-empty")
-        if self.ionic_strength < 0:
-            raise ValueError("ionic_strength must be non-negative")
-        if not self.receptor_chain_names:
-            raise ValueError("receptor_chain_names must not be empty")
-        if self.ghost_mass <= 0:
-            raise ValueError("ghost_mass must be positive")
-        return self
+    """Common AToM-specific native system settings."""
 
     def to_atom_options(self) -> dict[str, object]:
-        options: dict[str, object] = {
-            "LIGAND_FORCE_FIELD": self.ligand_forcefield,
-            "RCPT_CHAIN_NAMES": list(self.receptor_chain_names),
-            "GHOST_MASS": self.ghost_mass,
-        }
-        if self.forcefield_cache is not None:
-            options["FORCEFIELD_CACHE"] = self.forcefield_cache
-        return options
+        return {}
+
+
+class ATMAbsoluteSystemSettings(ATMSystemSettings):
+    """ABFE-only native system additions."""
+
+    ghost_mass: float = 12.011
+
+    @field_validator("ghost_mass")
+    @classmethod
+    def _validate_ghost_mass(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("ghost_mass must be positive")
+        return value
+
+    def to_atom_options(self) -> dict[str, object]:
+        return {"GHOST_MASS": self.ghost_mass}
 
 
 class ATMRunSettings(SettingsBaseModel):
@@ -434,7 +378,6 @@ class ATMRunSettings(SettingsBaseModel):
     print_frequency: int = 10000
     trajectory_frequency: int = 20000
     friction_coeff: float = 0.5
-    hmass: float = 1.5
     time_step: float = 0.004
     nodefile: str | None = None
     verbose: bool = False
@@ -469,8 +412,6 @@ class ATMRunSettings(SettingsBaseModel):
             raise ValueError("trajectory_frequency must be a multiple of production_steps")
         if self.friction_coeff <= 0:
             raise ValueError("friction_coeff must be positive")
-        if self.hmass <= 0:
-            raise ValueError("hmass must be positive")
         if self.time_step <= 0:
             raise ValueError("time_step must be positive")
         return self
@@ -488,7 +429,6 @@ class ATMRunSettings(SettingsBaseModel):
             "PRNT_FREQUENCY": self.print_frequency,
             "TRJ_FREQUENCY": self.trajectory_frequency,
             "FRICTION_COEFF": self.friction_coeff,
-            "HMASS": self.hmass,
             "TIME_STEP": self.time_step,
             "VERBOSE": self.verbose,
         }
@@ -498,19 +438,17 @@ class ATMRunSettings(SettingsBaseModel):
 
 
 class ATMSetupSettings(SettingsBaseModel):
-    """Setup options that bridge gufe components to AToM files."""
+    """Native setup output and cache controls."""
 
-    prepared_system_pdb: str | None = None
-    prepared_system_xml: str | None = None
     write_component_files: bool = True
+    forcefield_cache: str | None = "ff.json"
 
-    @model_validator(mode="after")
-    def _prepared_files_are_paired(self) -> "ATMSetupSettings":
-        if (self.prepared_system_pdb is None) ^ (self.prepared_system_xml is None):
-            raise ValueError(
-                "prepared_system_pdb and prepared_system_xml must be provided together"
-            )
-        return self
+    @field_validator("forcefield_cache")
+    @classmethod
+    def _cache_name_nonempty(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("forcefield_cache must be a non-empty path or None")
+        return value
 
 
 class ATMAnalysisSettings(SettingsBaseModel):
@@ -542,7 +480,7 @@ class ATMAnalysisSettings(SettingsBaseModel):
 class ATMSettings(gufe_settings.Settings):
     """Settings for one-box AToM protocols."""
 
-    forcefield_settings: gufe_settings.BaseForceFieldSettings = Field(
+    forcefield_settings: gufe_settings.OpenMMSystemGeneratorFFSettings = Field(
         default_factory=gufe_settings.OpenMMSystemGeneratorFFSettings
     )
     thermo_settings: gufe_settings.ThermoSettings = Field(
@@ -551,10 +489,15 @@ class ATMSettings(gufe_settings.Settings):
             pressure=1.0 * unit.bar,
         )
     )
+    solvation_settings: OpenMMSolvationSettings = Field(
+        default_factory=OpenMMSolvationSettings
+    )
+    partial_charge_settings: OpenFFPartialChargeSettings = Field(
+        default_factory=OpenFFPartialChargeSettings
+    )
     schedule: ATMScheduleSettings = Field(default_factory=ATMScheduleSettings)
     displacement: ATMDisplacementSettings = Field(default_factory=ATMDisplacementSettings)
     alignment: ATMAlignmentSettings = Field(default_factory=ATMAlignmentSettings)
-    atom_indices: ATMAtomIndexSettings = Field(default_factory=ATMAtomIndexSettings)
     restraints: ATMRestraintSettings = Field(default_factory=ATMRestraintSettings)
     softcore: ATMSoftcoreSettings = Field(default_factory=ATMSoftcoreSettings)
     system: ATMSystemSettings = Field(default_factory=ATMSystemSettings)
@@ -562,8 +505,33 @@ class ATMSettings(gufe_settings.Settings):
     setup: ATMSetupSettings = Field(default_factory=ATMSetupSettings)
     analysis: ATMAnalysisSettings = Field(default_factory=ATMAnalysisSettings)
 
+    @model_validator(mode="after")
+    def _validate_native_setup_support(self) -> "ATMSettings":
+        validate_solvation_settings(self.solvation_settings)
+        if self.thermo_settings.temperature is None:
+            raise ValueError("thermo_settings.temperature is required")
+        if self.thermo_settings.pressure is None:
+            raise ValueError("thermo_settings.pressure must be 1 bar for AToM")
+        pressure = self.thermo_settings.pressure.to(unit.bar).m
+        if abs(float(pressure) - 1.0) > 1.0e-8:
+            raise ValueError(
+                "AToM rbfe_structprep currently runs at 1 bar; "
+                "thermo_settings.pressure must be 1 bar"
+            )
+        supported_methods = {"pme", "ewald", "cutoffperiodic"}
+        method = self.forcefield_settings.nonbonded_method.lower()
+        if method not in supported_methods:
+            raise ValueError(
+                "AToM native setup supports periodic PME, Ewald, or "
+                f"CutoffPeriodic nonbonded methods; got {method!r}"
+            )
+        if not self.forcefield_settings.forcefields:
+            raise ValueError("forcefield_settings.forcefields must not be empty")
+        return self
+
     def to_atom_options(self) -> dict[str, object]:
-        options: dict[str, object] = {}
+        temperature = self.thermo_settings.temperature.to(unit.kelvin).m
+        options: dict[str, object] = {"TEMPERATURES": [float(temperature)]}
         for section in (
             self.schedule,
             self.displacement,
@@ -572,7 +540,6 @@ class ATMSettings(gufe_settings.Settings):
             self.system,
             self.run,
             self.alignment,
-            self.atom_indices,
         ):
             options.update(section.to_atom_options())
         return options
@@ -580,6 +547,10 @@ class ATMSettings(gufe_settings.Settings):
 
 class ATMAbsoluteBindingSettings(ATMSettings):
     """Settings for AToM ABFE through the ghost-ligand transfer path."""
+
+    system: ATMAbsoluteSystemSettings = Field(
+        default_factory=ATMAbsoluteSystemSettings
+    )
 
 
 class ATMRelativeBindingSettings(ATMSettings):
